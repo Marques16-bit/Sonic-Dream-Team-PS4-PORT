@@ -1,0 +1,57 @@
+name: Extrair zip no repositório
+
+# Para quem só tem o celular: o app do GitHub não extrai zip.
+#   1. Suba o zip na raiz do repositório (Add file > Upload files).
+#   2. Actions > "Extrair zip no repositório" > Run workflow.
+# Ele extrai na raiz, apaga o zip e faz o commit.
+#
+# Observação: o GITHUB_TOKEN padrão NÃO pode criar/alterar arquivos em .github/workflows.
+# Sem o segredo GH_PAT, a pasta .github/ do zip é ignorada (crie esses arquivos à mão).
+# Com GH_PAT (token fine-grained deste repositório com "Contents: write" e
+# "Workflows: write"), tudo é extraído, inclusive os workflows.
+on:
+  workflow_dispatch:
+    inputs:
+      zip_name:
+        description: Nome do zip na raiz do repositório
+        required: true
+        default: sonic-ps4.zip
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Extrair e fazer commit
+        env:
+          ZIP: ${{ inputs.zip_name }}
+          HAS_PAT: ${{ secrets.GH_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::Zip '$ZIP' não encontrado na raiz do repositório."
+            ls -la
+            exit 1
+          fi
+          EXCL=(-x '__MACOSX/*' '*.DS_Store')
+          if [ "$HAS_PAT" != "true" ]; then
+            EXCL+=('.github/*')
+            echo "::notice::Sem GH_PAT: a pasta .github/ do zip foi ignorada. Crie os workflows à mão."
+          fi
+          unzip -q -o "$ZIP" "${EXCL[@]}"
+          rm -f "$ZIP"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nada para commitar."
+            exit 0
+          fi
+          git commit -m "Extrair $ZIP"
+          git push
