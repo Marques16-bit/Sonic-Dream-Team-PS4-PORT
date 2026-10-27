@@ -1,0 +1,24 @@
+# Saídas de build
+build/
+eboot.bin
+pkg.gp4
+*.pkg
+sce_sys/param.sfo
+
+# Entrada/saída da recompilação (binário do jogo, relatórios, C++ gerado)
+input/
+analysis/
+gen/
+
+# Arquivos de sistema copiados do SDK pelo Makefile (não precisa versionar)
+sce_module/
+sce_sys/about/
+
+# NUNCA versionar arquivos do jogo original (binário, texturas, áudio, bundles).
+# Mantenha-os só no seu dispositivo/CI privado.
+assets/
+*.ipa
+*.apk
+*.obb
+*.unity3d
+global-metadata.dat
