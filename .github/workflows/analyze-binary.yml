@@ -1,0 +1,78 @@
+name: Analisar binário (etapa 0 da recompilação)
+
+# Mede o tamanho do problema ANTES de escrever o recompilador.
+# O binário do jogo fica como "asset" de uma release do seu repositório PRIVADO.
+#   1. No GitHub: Releases > Draft a new release > tag "binario" > anexe o arquivo
+#      (arquivos de release aceitam até 2 GB; o limite de 100 MB vale só para commits).
+#   2. Actions > "Analisar binário" > Run workflow > informe a tag e o nome do arquivo.
+# O relatório aparece no resumo da execução e o detalhe sai como artefato.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag da release que contém o binário
+        required: true
+        default: binario
+      asset_name:
+        description: Nome do arquivo anexado (Mach-O ARM64, sem criptografia)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Exigir repositório privado
+        if: ${{ !github.event.repository.private }}
+        run: |
+          echo "::error::Este repositório é público. Não envie arquivos do jogo para um repositório público."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Baixar o binário da release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          ASSET: ${{ inputs.asset_name }}
+        run: |
+          mkdir -p input
+          gh release download "$TAG" --pattern "$ASSET" --dir input --repo "$GITHUB_REPOSITORY"
+          ls -la input
+
+      - name: Analisar
+        id: run
+        env:
+          ASSET: ${{ inputs.asset_name }}
+        run: |
+          set +e
+          python3 -I tools/inspect_macho.py "input/$ASSET" --out analysis
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f analysis/report.md ]; then
+            cat analysis/report.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f analysis/summary.json ]; then
+            { echo '```json'; cat analysis/summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Publicar resultado da análise
+        uses: actions/upload-artifact@v4
+        with:
+          name: analise-binario
+          path: analysis/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Falhar se a análise não concluiu
+        if: steps.run.outputs.code != '0'
+        run: |
+          case "${{ steps.run.outputs.code }}" in
+            2) echo "::error::Binário criptografado: não há código legível para analisar. Veja docs/RECOMP.md." ;;
+            3) echo "::error::O arquivo não é um Mach-O ARM64 de 64 bits." ;;
+            *) echo "::error::Falha na análise (código ${{ steps.run.outputs.code }})." ;;
+          esac
+          exit 1

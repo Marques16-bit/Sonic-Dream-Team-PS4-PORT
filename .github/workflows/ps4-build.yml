@@ -1,0 +1,132 @@
+name: PS4 Build (OpenOrbis)
+
+# Roda a cada push na main/master, em tags v* e manualmente
+# (GitHub > Actions > "PS4 Build (OpenOrbis)" > Run workflow).
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ps4-build-${{ github.ref }}
+  cancel-in-progress: true
+
+# Versão do SDK fixa de propósito: o build fica reproduzível.
+# O asset da v0.5.4 foi compilado com LLVM 18, então usamos clang/lld 18.
+env:
+  OO_VERSION: v0.5.4
+  OO_ASSET: toolchain-llvm-18.tar.gz
+  LLVM_VERSION: "18"
+
+permissions:
+  contents: write   # necessário só para anexar o .pkg em releases de tags
+
+jobs:
+  # Testes do runtime da recompilação, rodando no PC (x86_64 Linux), não no PS4.
+  host-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Testar runtime de recompilação
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Isrc tests/recomp_test.cpp src/recomp/recomp.cpp -o "$RUNNER_TEMP/recomp_test"
+          "$RUNNER_TEMP/recomp_test"
+
+  build:
+    needs: host-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar clang e lld ${{ env.LLVM_VERSION }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-${LLVM_VERSION} lld-${LLVM_VERSION}
+          clang-${LLVM_VERSION} --version | head -1
+          ld.lld-${LLVM_VERSION} --version | head -1
+
+      - name: Cache do OpenOrbis SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/oo-sdk-download
+          key: openorbis-${{ env.OO_VERSION }}-${{ env.OO_ASSET }}
+
+      - name: Baixar OpenOrbis SDK ${{ env.OO_VERSION }}
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/oo-sdk-download
+          curl -fL --retry 4 --retry-delay 5 \
+            -o ~/oo-sdk-download/${OO_ASSET} \
+            "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/${OO_VERSION}/${OO_ASSET}"
+
+      - name: Extrair SDK e configurar OO_PS4_TOOLCHAIN
+        run: |
+          mkdir -p "$HOME/OpenOrbis"
+          # O tarball vem com o prefixo OpenOrbis/PS4Toolchain/
+          tar -xzf ~/oo-sdk-download/${OO_ASSET} -C "$HOME/OpenOrbis" --strip-components=2
+          chmod +x "$HOME"/OpenOrbis/bin/linux/*
+          test -f "$HOME/OpenOrbis/link.x" || { echo "SDK extraído errado"; ls "$HOME/OpenOrbis"; exit 1; }
+          echo "OO_PS4_TOOLCHAIN=$HOME/OpenOrbis" >> "$GITHUB_ENV"
+          echo "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1" >> "$GITHUB_ENV"
+
+      - name: Compilar (C++ x86_64) e gerar eboot.bin + pkg.gp4
+        run: |
+          make gp4 \
+            CC=clang-${LLVM_VERSION} \
+            CXX=clang++-${LLVM_VERSION} \
+            LD=ld.lld-${LLVM_VERSION}
+          ls -la eboot.bin pkg.gp4
+          test -s eboot.bin
+
+      # O PkgTool.Core (.NET Core 3.1) exige OpenSSL 1.1, que não existe mais
+      # no Ubuntu 24.04. Então só o empacotamento roda num contêiner Ubuntu 20.04.
+      - name: Empacotar .pkg (contêiner Ubuntu 20.04 com libssl1.1)
+        run: |
+          docker run --rm \
+            -v "$PWD":/work \
+            -v "$OO_PS4_TOOLCHAIN":/sdk:ro \
+            -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+            -e DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/dotnet \
+            -e HOME=/tmp \
+            ubuntu:20.04 bash -euxc '
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends libssl1.1 libstdc++6 zlib1g ca-certificates
+              /sdk/bin/linux/PkgTool.Core pkg_build pkg.gp4 .
+              chown -R '"$(id -u):$(id -g)"' /work
+            '
+          ls -la ./*.pkg
+          test -s ./*.pkg
+
+      - name: Enviar .pkg como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-ps4-pkg
+          path: "*.pkg"
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enviar eboot.bin como artefato (para testar via FTP/debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-ps4-eboot
+          path: eboot.bin
+          if-no-files-found: error
+          retention-days: 14
+
+      # Só em tags v*. Use um repositório PRIVADO se o pacote contiver arquivos do jogo.
+      - name: Anexar .pkg na release da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.pkg"
